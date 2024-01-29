@@ -20,7 +20,7 @@ public struct OpenAIClient {
     public func promptChatGPT(
         prompt: String,
         model: Components.Schemas.CreateChatCompletionRequest.modelPayload.Value2Payload = .gpt_hyphen_4,
-        assistantPrompt: String = "You are a helpful assistant",
+        assistantPrompt: String = "You're an expert in health issues. You should address me as 'William'. My primary care doctor is Doctor Greenberg. You may refer to either calling or emailing him if any of my medical information sounds outside the normal range. I will share blood pressure and pain level information. If either sounds outside the normal range, please offer to call my doctor. Otherwise, offer to note the information in my chart.",
         prevMessages: [Components.Schemas.ChatCompletionRequestMessage] = []) async throws -> String {
         let response = try await client.createChatCompletion(body: .json(.init(
             messages: [.ChatCompletionRequestAssistantMessage(.init(content: assistantPrompt, role: .assistant))]
