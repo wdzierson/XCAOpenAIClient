@@ -8,20 +8,30 @@ public struct OpenAIClient {
     private let urlSession = URLSession.shared
     private let apiKey: String
     
-    public init(apiKey: String) {
+    // Add an instance of ElevenLabsClient for text-to-speech with Eleven Labs.
+    private let elevenLabsClient: ElevenLabsClient
+    
+    // Default to using Eleven Labs for text-to-speech unless overridden.
+    public var useElevenLabsForTTS: Bool = true
+    
+    public init(apiKey: String, elevenLabsApiKey: String) {
         self.client = Client(
             serverURL: try! Servers.server1(),
             transport: URLSessionTransport(),
-            middlewares: [AuthMiddleware(apiKey: apiKey)])
+            middlewares: [AuthMiddleware(apiKey: apiKey)]
+        )
+        self.elevenLabsClient = ElevenLabsClient(apiKey: elevenLabsApiKey)
         self.apiKey = apiKey
     }
     
+    // MARK: - ChatGPT Prompt
     
     public func promptChatGPT(
         prompt: String,
         model: Components.Schemas.CreateChatCompletionRequest.modelPayload.Value2Payload = .gpt_hyphen_4,
-        assistantPrompt: String = "You're an expert in health issues. You should address me as 'William'. My primary care doctor is Doctor Greenberg. You may refer to either calling or emailing him if any of my medical information sounds outside the normal range. I will share blood pressure and pain level information. If either sounds outside the normal range, please offer to call my doctor. Otherwise, offer to note the information in my chart.",
+        assistantPrompt: String = "You are a an AI-based clone of a real person named Will Dzierson. Here is your biography based on his information: I am a technologist with a strong background in user experience, healthcare AI, and product design. I grew up in Albany, NY, and attended Emerson College. In 2005, I moved to San Francisco, where I spent 15 years leading large-scale projects for companies like Google, Salesforce, and Grand Rounds, including work on Google Search and other mobile applications. I returned to Boston in 2019 and now reside in Saratoga Springs, NY. My professional focus has been at the intersection of healthcare and AI, where I’ve led the development of innovative products like a personal health record app designed to help patients manage their health data using AI-driven natural language processing. I’ve also built applications that integrate AI tools into user-friendly platforms, such as my recent project, Noodle AI, aimed at centralizing patient health management via WhatsApp and other mobile-first technologies. In addition to my work in technology, I have interests in freelance consulting, mentoring in healthcare AI, and exploring ways to improve patient care through digital solutions. I am deeply passionate about helping underserved communities and continue to explore opportunities to apply AI to healthcare challenges globally. >> Tone of voice note: please keep the tone lightheared and avoid speaking in a monotone fashion.",
         prevMessages: [Components.Schemas.ChatCompletionRequestMessage] = []) async throws -> String {
+        
         let response = try await client.createChatCompletion(body: .json(.init(
             messages: [.ChatCompletionRequestAssistantMessage(.init(content: assistantPrompt, role: .assistant))]
             + prevMessages
@@ -38,14 +48,21 @@ public struct OpenAIClient {
         case .undocumented(let statusCode, let payload):
             throw "OpenAIClientError - statuscode: \(statusCode), \(payload)"
         }
-        
     }
     
-    public func generateSpeechFrom(input: String,
-                                   model: Components.Schemas.CreateSpeechRequest.modelPayload.Value2Payload = .tts_hyphen_1,
-                                   voice: Components.Schemas.CreateSpeechRequest.voicePayload = .alloy,
-                                   format: Components.Schemas.CreateSpeechRequest.response_formatPayload = .aac
-    ) async throws -> Data {
+    // MARK: - Eleven Labs Text-to-Speech
+    
+    public func generateSpeechFromElevenLabs(text: String, voiceId: String, completion: @escaping (Result<Data, Error>) -> Void) {
+        elevenLabsClient.generateSpeechFrom(text: text, voiceId: voiceId, completion: completion)
+    }
+    
+    // MARK: - OpenAI Text-to-Speech (Fallback)
+    
+    public func generateSpeechFromOpenAI(input: String,
+                                         model: Components.Schemas.CreateSpeechRequest.modelPayload.Value2Payload = .tts_hyphen_1,
+                                         voice: Components.Schemas.CreateSpeechRequest.voicePayload = .alloy,
+                                         format: Components.Schemas.CreateSpeechRequest.response_formatPayload = .aac) async throws -> Data {
+        
         let response = try await client.createSpeech(body: .json(
             .init(
                 model: .init(value1: nil, value2: model),
@@ -64,13 +81,33 @@ public struct OpenAIClient {
                 }
                 return data
             }
-            
         case .undocumented(let statusCode, let payload):
             throw "OpenAIClientError - statuscode: \(statusCode), \(payload)"
         }
     }
-
-    /// Use URLSession manually until swift-openapi-runtime support MultipartForm
+    
+    // Function to handle speech generation based on which TTS service is selected (Eleven Labs by default).
+    public func generateSpeech(text: String, voiceId: String? = nil) async throws -> Data {
+        if useElevenLabsForTTS, let voiceId = voiceId {
+            // Use Eleven Labs for text-to-speech if enabled
+            return try await withCheckedThrowingContinuation { continuation in
+                elevenLabsClient.generateSpeechFrom(text: text, voiceId: voiceId) { result in
+                    switch result {
+                    case .success(let data):
+                        continuation.resume(returning: data)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } else {
+            // Use OpenAI's TTS if Eleven Labs is not used or voiceId is nil
+            return try await generateSpeechFromOpenAI(input: text)
+        }
+    }
+    
+    // MARK: - OpenAI Whisper API (Transcription)
+    
     public func generateAudioTransciptions(audioData: Data, fileName: String = "recording.m4a") async throws -> String {
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/audio/transcriptions")!)
         let boundary: String = UUID().uuidString
@@ -95,67 +132,4 @@ public struct OpenAIClient {
         
         return text
     }
-    
-    public func generateDallE3Image(prompt: String,
-                                    quality: Components.Schemas.CreateImageRequest.qualityPayload = .standard,
-                                    responseFormat: Components.Schemas.CreateImageRequest.response_formatPayload = .url,
-                                    style: Components.Schemas.CreateImageRequest.stylePayload = .vivid
-                                    
-    ) async throws -> Components.Schemas.Image {
-        
-        let response = try await client.createImage(.init(body: .json(
-            .init(
-                prompt: prompt,
-                model: .init(value1: nil, value2: .dall_hyphen_e_hyphen_3),
-                n: 1,
-                quality: quality,
-                response_format: responseFormat,
-                size: ._1024x1024,
-                style: style
-            ))))
-        
-        switch response {
-        case .ok(let response):
-            switch response.body {
-            case .json(let imageResponse) where imageResponse.data.first != nil:
-                return imageResponse.data.first!
-                
-            default:
-                throw "Unknown response"
-            }
-            
-        case .undocumented(let statusCode, let payload):
-            throw "OpenAIClientError - statuscode: \(statusCode), \(payload)"
-        }
-    }
-    
-    public func promptChatGPTVision(
-        imageData: Data,
-        detail: Components.Schemas.ChatCompletionRequestMessageContentPartImage.image_urlPayload.detailPayload = .low,
-            maxTokens: Int? = 300) async throws -> String {
-        let response = try await client.createChatCompletion(body: .json(.init(
-            messages: [
-                .ChatCompletionRequestUserMessage(.init(content: .case1("Describe this image in details, provide all visual representations, you can ignore text within the image"), role: .user)),
-                       .ChatCompletionRequestUserMessage(
-                        .init(content: .case2([.ChatCompletionRequestMessageContentPartImage(
-                            .init(_type: .image_url, image_url:
-                                    .init(url: "data:image/jpeg;base64,\(imageData.base64EncodedString())", detail: detail)))]
-                        ), role: .user))
-            ],
-            model: .init(value1: nil, value2: .gpt_hyphen_4_hyphen_vision_hyphen_preview),
-            max_tokens: maxTokens)))
-            
-        switch response {
-        case .ok(let body):
-            let json = try body.body.json
-            guard let content = json.choices.first?.message.content else {
-                throw "No Response"
-            }
-            return content
-        case .undocumented(let statusCode, let payload):
-            throw "OpenAIClientError - statuscode: \(statusCode), \(payload)"
-        }
-        
-    }
-    
 }
